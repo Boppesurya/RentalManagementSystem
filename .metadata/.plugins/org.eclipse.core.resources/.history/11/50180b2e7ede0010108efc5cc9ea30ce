@@ -1,0 +1,336 @@
+package com.xerox.rental.service;
+
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Optional;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import com.xerox.rental.entity.CompanySettings;
+import com.xerox.rental.entity.Invoice;
+import com.xerox.rental.entity.InvoiceItem;
+import com.xerox.rental.entity.Machine;
+import com.xerox.rental.entity.User;
+import com.xerox.rental.repository.InvoiceItemRepository;
+import com.xerox.rental.repository.InvoiceRepository;
+import com.xerox.rental.repository.MachineRepository;
+import com.xerox.rental.repository.UserRepository;
+
+@Service
+public class InvoiceService {
+
+    @Autowired
+    private InvoiceRepository invoiceRepository;
+    
+    @Autowired
+    private EmailTemplateService emailTemplateService;
+    
+    @Autowired
+    private PdfGenerationService pdfGenerationService;
+
+
+    @Autowired
+    private EmailService emailService;
+
+    @Autowired
+    private InvoiceItemRepository invoiceItemRepository;
+
+    @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private MachineRepository machineRepository;
+
+    @Autowired
+    private CompanySettingsService companySettingsService;
+    
+    
+   
+    
+    public List<Invoice> getAllInvoices() {
+        return invoiceRepository.findAllWithRelations();
+    }
+    
+    public List<Machine> getMachinesByRental(Long rentalId) {
+        return machineRepository.findByRentalId(rentalId);
+    }
+
+    
+    public Optional<Invoice> getInvoiceById(Long id) {
+        return invoiceRepository.findById(id);
+    }
+    
+    public Invoice createInvoice(Invoice invoice) {
+        String invoiceNumber = generateInvoiceNumberForOwner(invoice.getOwner().getId());
+        invoice.setInvoiceNumber(invoiceNumber);
+
+        // Handle multi-machine invoice items
+        if (invoice.getInvoiceItems() != null && !invoice.getInvoiceItems().isEmpty()) {
+            double totalAmount = 0.0;
+
+            for (InvoiceItem item : invoice.getInvoiceItems()) {
+                item.setInvoice(invoice);
+                calculateInvoiceItemAmount(item);
+                totalAmount += item.getAmount();
+
+                // Update machine usage
+                if (item.getClosingReading() != null) {
+                    updateMachineUsage(item.getMachine(), item.getClosingReading());
+                }
+            }
+
+            invoice.setAmount(totalAmount);
+        } else {
+            // Handle single-machine invoice (legacy support)
+            if (invoice.getStartingReading() != null && invoice.getClosingReading() != null) {
+                calculateCopies(invoice);
+            }
+
+            if (invoice.getClosingReading() != null && invoice.getMachine() != null) {
+                updateMachineUsage(invoice.getMachine(), invoice.getClosingReading());
+            }
+        }
+
+        Optional<CompanySettings> settings = companySettingsService.getSettingsByOwnerId(invoice.getOwner().getId());
+        if (settings.isPresent()) {
+            CompanySettings companySettings = settings.get();
+            invoice.setCompanyLogoUrl(companySettings.getCompanyLogoUrl() != null 
+            	    ? companySettings.getCompanyLogoUrl() 
+            	    : null);
+            invoice.setStampImageUrl(companySettings.getStampImageUrl()!=null
+            		?companySettings.getStampImageUrl():null);
+            invoice.setSignatureImageUrl(companySettings.getSignatureImageUrl()!=null
+            		?companySettings.getSignatureImageUrl():null);
+        }
+
+        Double gstAmount = invoice.getAmount() * 0.18;
+        invoice.setGstAmount(gstAmount);
+        invoice.setTotalAmount(invoice.getAmount() + gstAmount);
+
+        Invoice savedInvoice = invoiceRepository.save(invoice);
+        
+     // Send email
+        sendInvoiceEmails(savedInvoice);
+        
+
+        return savedInvoice;
+    }
+
+    private void calculateInvoiceItemAmount(InvoiceItem item) {
+
+        long freeCopies = item.getFreeCopies() != null ? item.getFreeCopies() : 0L;
+        double copyRatio = item.getCopyRatio() != null ? item.getCopyRatio() : 0.0;
+        double monthlyRent = item.getMonthlyRent() != null ? item.getMonthlyRent() : 0.0;
+
+        // If using defaults from companySettings
+        Optional<CompanySettings> settingsOpt = 
+            companySettingsService.getSettingsByOwnerId(item.getInvoice().getOwner().getId());
+
+        if (settingsOpt.isPresent()) {
+            CompanySettings settings = settingsOpt.get();
+            if (freeCopies == 0) freeCopies = settings.getDefaultFreeCopies();
+            if (copyRatio == 0) copyRatio = settings.getDefaultCopyRatio();
+        }
+
+        if (item.getStartingReading() != null && item.getClosingReading() != null) {
+
+            long totalCopies = item.getClosingReading() - item.getStartingReading();
+            if (totalCopies < 0) totalCopies = 0;
+
+            item.setTotalCopies(totalCopies);
+
+            long billableCopies = Math.max(totalCopies - freeCopies, 0);
+            item.setBillableCopies(billableCopies);
+
+            double amount = monthlyRent + (billableCopies * copyRatio);
+            item.setAmount(amount);
+
+        } else {
+            item.setAmount(monthlyRent);
+        }
+    }
+
+
+    private void calculateCopies(Invoice invoice) {
+        long totalCopies = invoice.getClosingReading() - invoice.getStartingReading();
+        invoice.setTotalCopies(totalCopies);
+
+        long freeCopies = invoice.getFreeCopies() != null ? invoice.getFreeCopies() : 0L;
+        long billableCopies = totalCopies - freeCopies;
+        billableCopies = Math.max(billableCopies, 0);
+        invoice.setBillableCopies(billableCopies);
+
+        // If total copies are less than or equal to free copies, only charge monthly rent
+        if (totalCopies <= freeCopies) {
+            // Only monthly rent, no copy charges
+            double monthlyRent = invoice.getMonthlyRent() != null ? invoice.getMonthlyRent() : 0.0;
+            invoice.setAmount(monthlyRent);
+        } else {
+            // Charge for billable copies plus monthly rent
+            double monthlyRent = invoice.getMonthlyRent() != null ? invoice.getMonthlyRent() : 0.0;
+            double copyCharges = 0.0;
+
+            if (invoice.getCopyRatio() != null && invoice.getCopyRatio() > 0) {
+                copyCharges = billableCopies * invoice.getCopyRatio();
+            }
+
+            invoice.setAmount(monthlyRent + copyCharges);
+        }
+    }
+
+    private void updateMachineUsage(Machine machine, Long closingReading) {
+        try {
+            Machine fullMachine = machineRepository.findById(machine.getId())
+                    .orElseThrow(() -> new RuntimeException("Machine not found"));
+            fullMachine.setUsage(closingReading);
+            machineRepository.save(fullMachine);
+        } catch (Exception e) {
+            System.err.println("Error updating machine usage: " + e.getMessage());
+        }
+    }
+
+    public Long getLastClosingReading(Long machineId, Long ownerId) {
+        List<Invoice> invoices = invoiceRepository.findByMachineIdAndOwnerIdOrderByCreatedAtDesc(machineId, ownerId);
+        if (!invoices.isEmpty() && invoices.get(0).getClosingReading() != null) {
+            return invoices.get(0).getClosingReading();
+        }
+
+        Machine machine = machineRepository.findById(machineId)
+                .orElseThrow(() -> new RuntimeException("Machine not found"));
+        return machine.getUsage() != null ? machine.getUsage() : 0L;
+    }
+    
+    public Invoice updateInvoice(Long id, Invoice invoiceDetails) {
+        Invoice invoice = invoiceRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Invoice not found"));
+        
+        if (invoiceDetails.getRental() != null) {
+            invoice.setRental(invoiceDetails.getRental());
+        }
+        if (invoiceDetails.getOwner() != null) {
+            invoice.setOwner(invoiceDetails.getOwner());
+        }
+        if (invoiceDetails.getMachine() != null) {
+            invoice.setMachine(invoiceDetails.getMachine());
+        }
+        if (invoiceDetails.getAmount() != null) {
+            invoice.setAmount(invoiceDetails.getAmount());
+        }
+        if (invoiceDetails.getStatus() != null) {
+            invoice.setStatus(invoiceDetails.getStatus());
+        }
+        if (invoiceDetails.getDueDate() != null) {
+            invoice.setDueDate(invoiceDetails.getDueDate());
+        }
+        if (invoiceDetails.getPaidDate() != null) {
+            invoice.setPaidDate(invoiceDetails.getPaidDate());
+        }
+        if (invoiceDetails.getPaymentMode() != null) {
+            invoice.setPaymentMode(invoiceDetails.getPaymentMode());
+        }
+        
+        // Recalculate GST and total if amount changed
+        if (invoiceDetails.getAmount() != null) {
+            Double gstAmount = invoiceDetails.getAmount() * 0.18;
+            invoice.setGstAmount(gstAmount);
+            invoice.setTotalAmount(invoiceDetails.getAmount() + gstAmount);
+        }
+        
+        return invoiceRepository.save(invoice);
+    }
+    
+    public void deleteInvoice(Long id) {
+        invoiceRepository.deleteById(id);
+    }
+    
+    public List<Invoice> getInvoicesByOwner(Long ownerId) {
+        User owner = userRepository.findById(ownerId)
+                .orElseThrow(() -> new RuntimeException("Owner not found"));
+        return invoiceRepository.findByOwner(owner);
+    }
+    
+    public List<Invoice> getInvoicesByRental(Long rentalId) {
+        User rental = userRepository.findById(rentalId)
+                .orElseThrow(() -> new RuntimeException("Rental not found"));
+        return invoiceRepository.findByRental(rental);
+    }
+    
+    public List<Invoice> getInvoicesByStatus(Invoice.Status status) {
+        return invoiceRepository.findByStatus(status);
+    }
+    
+    public Invoice markAsPaid(Long id, Invoice.PaymentMode paymentMode) {
+        Invoice invoice = invoiceRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Invoice not found"));
+        
+        invoice.setStatus(Invoice.Status.PAID);
+        invoice.setPaidDate(LocalDateTime.now());
+        invoice.setPaymentMode(paymentMode);
+        
+        return invoiceRepository.save(invoice);
+    }
+    
+    private String generateInvoiceNumber() {
+        long count = invoiceRepository.count();
+        return String.format("INV-%d-%04d", LocalDateTime.now().getYear(), count + 1);
+    }
+
+    private String generateInvoiceNumberForOwner(Long ownerId) {
+        long count = invoiceRepository.countByOwnerId(ownerId);
+        return String.format("INV-%d-%04d", ownerId, count + 1);
+    }
+    
+    private void sendInvoiceEmails(Invoice invoice) {
+        try {
+            User owner = invoice.getOwner();
+            User customer = invoice.getRental();
+            Machine machine = invoice.getMachine(); // can be null
+
+            // Get company settings (logo, stamp etc)
+            CompanySettings settings = companySettingsService
+                    .getSettingsByOwnerId(invoice.getOwner().getId())
+                    .orElse(null);
+
+            // Generate PDF
+            byte[] pdfBytes = pdfGenerationService.generateInvoicePdf(invoice, machine, customer, owner);
+
+            String fileName = invoice.getInvoiceNumber() + ".pdf";
+
+            // Build beautiful HTML template
+            String htmlBody = emailTemplateService.buildInvoiceEmail(invoice, settings);
+
+            String subject = "Invoice " + invoice.getInvoiceNumber();
+
+            // Send to Owner
+            if (owner != null && owner.getEmail() != null) {
+                emailService.sendEmailWithAttachment(
+                        owner.getEmail(),
+                        owner.getName(),
+                        subject,
+                        htmlBody,
+                        pdfBytes,
+                        fileName
+                );
+            }
+
+            // Send to Customer
+            if (customer != null && customer.getEmail() != null) {
+                emailService.sendEmailWithAttachment(
+                        customer.getEmail(),
+                        customer.getName(),
+                        subject,
+                        htmlBody,
+                        pdfBytes,
+                        fileName
+                );
+            }
+
+        } catch (Exception e) {
+            System.err.println("Failed to send invoice emails: " + e.getMessage());
+        }
+    }
+
+
+    
+}

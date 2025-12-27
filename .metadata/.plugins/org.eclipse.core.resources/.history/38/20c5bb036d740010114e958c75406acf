@@ -1,0 +1,14 @@
+package com.xerox.rental;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class XeroxRentalManagementApplication {
+
+	public static void main(String[] args) {
+		SpringApplication.run(XeroxRentalManagementApplication.class, args);
+		
+	}
+	
+}

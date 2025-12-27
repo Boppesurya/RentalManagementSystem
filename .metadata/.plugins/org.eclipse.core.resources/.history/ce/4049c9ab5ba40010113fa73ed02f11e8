@@ -1,0 +1,86 @@
+package com.xerox.rental.controller;
+
+import java.util.List;
+import java.util.Map;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import com.xerox.rental.entity.Notification;
+import com.xerox.rental.service.NotificationService;
+
+@RestController
+@RequestMapping("/api/notifications")
+@CrossOrigin(origins = "*")
+public class NotificationController {
+	@Autowired
+    private NotificationService notificationService;
+    
+    @GetMapping
+    public ResponseEntity<List<Notification>> getAllNotifications() {
+        return ResponseEntity.ok(notificationService.getAllNotifications());
+    }
+    
+    @GetMapping("/user/{userId}")
+    public ResponseEntity<List<Notification>> getNotificationsByUser(@PathVariable Long userId) {
+        return ResponseEntity.ok(notificationService.getNotificationsByUser(userId));
+    }
+    
+    @GetMapping("/user/{userId}/unread")
+    public ResponseEntity<List<Notification>> getUnreadNotificationsByUser(@PathVariable Long userId) {
+        return ResponseEntity.ok(notificationService.getUnreadNotificationsByUser(userId));
+    }
+    
+    @GetMapping("/user/{userId}/unread-count")
+    public ResponseEntity<Map<String, Long>> getUnreadCountByUser(@PathVariable Long userId) {
+        Long count = notificationService.getUnreadCountByUser(userId);
+        return ResponseEntity.ok(Map.of("count", count));
+    }
+    
+    @PostMapping
+    public ResponseEntity<Notification> createNotification(@RequestBody Map<String, Object> request) {
+        try {
+            Long userId = Long.valueOf(request.get("userId").toString());
+            String title = request.get("title").toString();
+            String message = request.get("message").toString();
+            Notification.NotificationType type = Notification.NotificationType.valueOf(request.get("type").toString());
+            Notification.Priority priority = Notification.Priority.valueOf(request.get("priority").toString());
+            
+            Notification notification = notificationService.createNotification(userId, title, message, type, priority);
+            return ResponseEntity.ok(notification);
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().build();
+        }
+    }
+    
+    @PutMapping("/{id}/read")
+    public ResponseEntity<Notification> markAsRead(@PathVariable Long id) {
+        try {
+            Notification notification = notificationService.markAsRead(id);
+            return ResponseEntity.ok(notification);
+        } catch (RuntimeException e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+    
+    @PutMapping("/user/{userId}/read-all")
+    public ResponseEntity<String> markAllAsRead(@PathVariable Long userId) {
+        notificationService.markAllAsRead(userId);
+        return ResponseEntity.ok("All notifications marked as read");
+    }
+    
+    @DeleteMapping("/cleanup-expired")
+    public ResponseEntity<String> cleanupExpiredNotifications() {
+        notificationService.cleanupExpiredNotifications();
+        return ResponseEntity.ok("Expired notifications cleaned up");
+    }
+}

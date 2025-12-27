@@ -1,0 +1,225 @@
+package com.xerox.rental.controller;
+
+
+
+
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+import com.xerox.rental.dto.UserRequest;
+import com.xerox.rental.dto.UserResponse;
+import com.xerox.rental.entity.User;
+import com.xerox.rental.service.AuditLogService;
+import com.xerox.rental.service.NotificationService;
+import com.xerox.rental.service.UserService;
+
+@RestController
+@RequestMapping("/api/users")
+@CrossOrigin(origins = "*")
+public class UserController {
+	@Autowired
+    private UserService userService;
+    
+    @Autowired
+    private NotificationService notificationService;
+    
+    
+    
+    @Autowired
+    private AuditLogService auditLogService;
+    
+    
+ 
+    
+    
+    @GetMapping
+    public ResponseEntity<List<UserResponse>> getAllUsers(
+            @RequestParam(required = false) String currentUserId,
+            @RequestParam(required = false) String currentUserRole) {
+        try {
+            System.out.println("UserController: Getting users for currentUserId=" + currentUserId + ", role=" + currentUserRole);
+            List<User> users = userService.getAllUsers();
+            System.out.println("UserController: Total users from database: " + users.size());
+
+            if ("OWNER".equalsIgnoreCase(currentUserRole) && currentUserId != null) {
+                // Owner → can see rental users linked to them
+                Long ownerId = Long.parseLong(currentUserId);
+                users = users.stream()
+                        .filter(u -> u.getRole() == User.Role.RENTAL &&
+                                u.getOwner() != null &&
+                                u.getOwner().getId().equals(ownerId))
+                        .collect(Collectors.toList());
+                System.out.println("Owner " + ownerId + " filtered rental users: " + users.size());
+
+            } else if ("RENTAL".equalsIgnoreCase(currentUserRole)) {
+                // Rental → should see all owners (for dropdown)
+                users = users.stream()
+                        .filter(u -> u.getRole() == User.Role.OWNER)
+                        .collect(Collectors.toList());
+                System.out.println("Rental user fetched owners: " + users.size());
+
+            } else if ("ADMIN".equalsIgnoreCase(currentUserRole)) {
+                // Admin → sees everyone (no filtering)
+                System.out.println("Admin fetched all users: " + users.size());
+            } else {
+                // Default safety (no valid role)
+                users = List.of();
+            }
+
+            // Convert to DTO
+            List<UserResponse> response = users.stream()
+                    .map(UserResponse::fromEntity)
+                    .collect(Collectors.toList());
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.badRequest().build();
+        }
+    }
+
+    
+    @GetMapping("/{id}")
+    public ResponseEntity<UserResponse> getUserById(@PathVariable Long id) {
+        return userService.getUserById(id)
+                .map(user -> ResponseEntity.ok(UserResponse.fromEntity(user)))
+                .orElse(ResponseEntity.notFound().build());
+    }
+    
+    @PostMapping
+    public ResponseEntity<UserResponse> createUser(@RequestBody UserRequest request) {
+        try {
+            System.out.println("Creating user with role: " + request.getRole());
+            System.out.println("Owner ID from request: " + request.getOwnerId());
+            
+            User user = new User();
+            user.setName(request.getName());
+            user.setEmail(request.getEmail());
+            user.setContactNumber(request.getContactNumber());
+            user.setAddress(request.getAddress());
+            user.setGstNumber(request.getGstNumber());
+            user.setIsPasswordChanged(request.getIsPasswordChanged() != null ? request.getIsPasswordChanged() : false);
+            
+            // Set role
+            if (request.getRole() != null) {
+                user.setRole(User.Role.valueOf(request.getRole().toUpperCase()));
+            }
+            
+            // Set password (will be encoded in service)
+            if (request.getPassword() != null && !request.getPassword().isEmpty()) {
+                user.setPassword(request.getPassword());
+            }
+            
+            // Set owner relationship
+            Long ownerId = request.getOwnerId();
+            if (ownerId != null) {
+                Optional<User> owner = userService.getUserById(ownerId);
+                if (owner.isPresent()) {
+                    user.setOwner(owner.get());
+                    System.out.println("Setting owner " + ownerId + " for " + user.getRole() + " user " + user.getName());
+                } else {
+                    System.out.println("Owner not found: " + ownerId);
+                    return ResponseEntity.badRequest().build();
+                }
+            } else if (request.getRole() != null && ("RENTAL".equalsIgnoreCase(request.getRole()) || "TECHNICIAN".equalsIgnoreCase(request.getRole()))) {
+                System.out.println("Warning: Creating " + request.getRole() + " user without owner ID");
+            }
+            
+            User createdUser = userService.createUser(user);
+            System.out.println("Created user: " + createdUser.getName() + " with owner: " + 
+                (createdUser.getOwner() != null ? createdUser.getOwner().getId() : "null"));
+            
+            // Log user creation
+            try {
+                auditLogService.logEntityCreation(
+                    createdUser, 
+                    "User", 
+                    createdUser.getId().toString(), 
+                    "Created user: " + createdUser.getName() + " with role: " + createdUser.getRole()
+                );
+            } catch (Exception e) {
+                System.err.println("Error logging user creation: " + e.getMessage());
+            }
+            
+            // Send welcome notification
+            try {
+                notificationService.sendWelcomeNotification(createdUser);
+            } catch (Exception e) {
+                System.err.println("Error sending welcome notification: " + e.getMessage());
+            }
+            
+            return ResponseEntity.ok(UserResponse.fromEntity(createdUser));
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.badRequest().build();
+        }
+    }
+    
+    @PutMapping("/{id}")
+    public ResponseEntity<UserResponse> updateUser(@PathVariable Long id, @RequestBody UserRequest request) {
+        try {
+            User userDetails = new User();
+            userDetails.setName(request.getName());
+            userDetails.setEmail(request.getEmail());
+            userDetails.setContactNumber(request.getContactNumber());
+            userDetails.setAddress(request.getAddress());
+            userDetails.setGstNumber(request.getGstNumber());
+            
+            // Set role
+            if (request.getRole() != null) {
+                userDetails.setRole(User.Role.valueOf(request.getRole().toUpperCase()));
+            }
+            
+            // Set password if provided
+            if (request.getPassword() != null && !request.getPassword().isEmpty()) {
+                userDetails.setPassword(request.getPassword());
+            }
+            
+            // Set owner relationship
+            Long ownerId = request.getOwnerId();
+            if (ownerId != null) {
+                Optional<User> owner = userService.getUserById(ownerId);
+                if (owner.isPresent()) {
+                    userDetails.setOwner(owner.get());
+                    System.out.println("Updated owner for user " + userDetails.getName() + " to " + ownerId);
+                }
+            }
+            
+            User updatedUser = userService.updateUser(id, userDetails);
+            return ResponseEntity.ok(UserResponse.fromEntity(updatedUser));
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.badRequest().build();
+        }
+    }
+    
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> deleteUser(@PathVariable Long id) {
+        userService.deleteUser(id);
+        return ResponseEntity.ok().build();
+    }
+    
+    @GetMapping("/role/{role}")
+    public ResponseEntity<List<UserResponse>> getUsersByRole(@PathVariable User.Role role) {
+        List<User> users = userService.getUsersByRole(role);
+        List<UserResponse> response = users.stream()
+                .map(UserResponse::fromEntity)
+                .collect(Collectors.toList());
+        return ResponseEntity.ok(response);
+    }
+}

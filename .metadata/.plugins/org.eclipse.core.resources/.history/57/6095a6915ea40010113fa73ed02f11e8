@@ -1,0 +1,172 @@
+package com.xerox.rental.controller;
+
+import java.util.List;
+import java.util.Optional;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import com.xerox.rental.dto.RentalRequestDto;
+import com.xerox.rental.entity.Machine;
+import com.xerox.rental.entity.RentalRequest;
+import com.xerox.rental.entity.User;
+import com.xerox.rental.service.MachineService;
+import com.xerox.rental.service.RentalRequestService;
+import com.xerox.rental.service.UserService;
+
+@RestController
+@RequestMapping("/api/rental-requests")
+@CrossOrigin(origins = "*")
+public class RentalRequestController {
+	 @Autowired
+	    private RentalRequestService rentalRequestService;
+	    
+	    @Autowired
+	    private UserService userService;
+	    
+	    @Autowired
+	    private MachineService machineService;
+	    
+	    @GetMapping
+	    public ResponseEntity<List<RentalRequest>> getAllRentalRequests() {
+	        return ResponseEntity.ok(rentalRequestService.getAllRentalRequests());
+	    }
+	    
+	    @GetMapping("/{id}")
+	    public ResponseEntity<RentalRequest> getRentalRequestById(@PathVariable Long id) {
+	        return rentalRequestService.getRentalRequestById(id)
+	                .map(ResponseEntity::ok)
+	                .orElse(ResponseEntity.notFound().build());
+	    }
+	    
+	    @PostMapping
+	    public ResponseEntity<RentalRequest> createRentalRequest(@RequestBody RentalRequestDto request) {
+	        try {
+	            RentalRequest rentalRequest = new RentalRequest();
+	            rentalRequest.setRequestDate(request.getRequestDate());
+	            rentalRequest.setStartDate(request.getStartDate());
+	            rentalRequest.setEndDate(request.getEndDate());
+	            rentalRequest.setMonthlyRent(request.getMonthlyRent());
+	            rentalRequest.setMessage(request.getMessage());
+	            
+	            // Set status
+	            if (request.getStatus() != null) {
+	                rentalRequest.setStatus(RentalRequest.Status.valueOf(request.getStatus().toUpperCase()));
+	            }
+	            
+	            // Set rental user
+	            Long rentalId = request.getRentalId();
+	            if (rentalId != null) {
+	                Optional<User> rental = userService.getUserById(rentalId);
+	                if (rental.isPresent()) {
+	                    rentalRequest.setRental(rental.get());
+	                } else {
+	                    return ResponseEntity.badRequest().build();
+	                }
+	            }
+	            
+	            // Set owner
+	            Long ownerId = request.getOwnerId();
+	            if (ownerId != null) {
+	                Optional<User> owner = userService.getUserById(ownerId);
+	                if (owner.isPresent()) {
+	                    rentalRequest.setOwner(owner.get());
+	                } else {
+	                    return ResponseEntity.badRequest().build();
+	                }
+	            }
+	            
+	            // Set machine
+	            Long machineId = request.getMachineId();
+	            if (machineId != null) {
+	                Optional<Machine> machine = machineService.getMachineById(machineId);
+	                if (machine.isPresent()) {
+	                    rentalRequest.setMachine(machine.get());
+	                } else {
+	                    return ResponseEntity.badRequest().build();
+	                }
+	            }
+	            
+	            RentalRequest createdRequest = rentalRequestService.createRentalRequest(rentalRequest);
+	            return ResponseEntity.ok(createdRequest);
+	        } catch (Exception e) {
+	            e.printStackTrace();
+	            return ResponseEntity.badRequest().build();
+	        }
+	    }
+	    
+	    @PutMapping("/{id}")
+	    public ResponseEntity<RentalRequest> updateRentalRequest(@PathVariable Long id, @RequestBody RentalRequestDto request) {
+	        try {
+	            Optional<RentalRequest> existingRequest = rentalRequestService.getRentalRequestById(id);
+	            if (existingRequest.isEmpty()) {
+	                return ResponseEntity.notFound().build();
+	            }
+	            
+	            RentalRequest rentalRequest = existingRequest.get();
+	            if (request.getStartDate() != null) {
+	                rentalRequest.setStartDate(request.getStartDate());
+	            }
+	            if (request.getEndDate() != null) {
+	                rentalRequest.setEndDate(request.getEndDate());
+	            }
+	            if (request.getMonthlyRent() != null) {
+	                rentalRequest.setMonthlyRent(request.getMonthlyRent());
+	            }
+	            if (request.getMessage() != null) {
+	                rentalRequest.setMessage(request.getMessage());
+	            }
+	            
+	            // Set status
+	            if (request.getStatus() != null) {
+	                rentalRequest.setStatus(RentalRequest.Status.valueOf(request.getStatus().toUpperCase()));
+	            }
+	            
+	            RentalRequest updatedRequest = rentalRequestService.updateRentalRequest(id, rentalRequest);
+	            return ResponseEntity.ok(updatedRequest);
+	        } catch (Exception e) {
+	            e.printStackTrace();
+	            return ResponseEntity.badRequest().build();
+	        }
+	    }
+	    
+	    @DeleteMapping("/{id}")
+	    public ResponseEntity<Void> deleteRentalRequest(@PathVariable Long id) {
+	        rentalRequestService.deleteRentalRequest(id);
+	        return ResponseEntity.ok().build();
+	    }
+	    
+	    @GetMapping("/owner/{ownerId}")
+	    public ResponseEntity<List<RentalRequest>> getRentalRequestsByOwner(@PathVariable Long ownerId) {
+	        return ResponseEntity.ok(rentalRequestService.getRentalRequestsByOwner(ownerId));
+	    }
+	    
+	    @GetMapping("/rental/{rentalId}")
+	    public ResponseEntity<List<RentalRequest>> getRentalRequestsByRental(@PathVariable Long rentalId) {
+	        return ResponseEntity.ok(rentalRequestService.getRentalRequestsByRental(rentalId));
+	    }
+	    
+	    @GetMapping("/status/{status}")
+	    public ResponseEntity<List<RentalRequest>> getRentalRequestsByStatus(@PathVariable RentalRequest.Status status) {
+	        return ResponseEntity.ok(rentalRequestService.getRentalRequestsByStatus(status));
+	    }
+	    
+	    @PutMapping("/{id}/approve")
+	    public ResponseEntity<RentalRequest> approveRequest(@PathVariable Long id) {
+	        return ResponseEntity.ok(rentalRequestService.approveRequest(id));
+	    }
+	    
+	    @PutMapping("/{id}/reject")
+	    public ResponseEntity<RentalRequest> rejectRequest(@PathVariable Long id) {
+	        return ResponseEntity.ok(rentalRequestService.rejectRequest(id));
+	    }
+}

@@ -1,0 +1,5 @@
+package com.xerox.rental.controller;
+
+public class AuditLogController {
+
+}

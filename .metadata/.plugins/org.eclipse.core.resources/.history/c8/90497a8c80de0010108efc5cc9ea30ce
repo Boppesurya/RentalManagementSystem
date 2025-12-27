@@ -1,0 +1,317 @@
+package com.xerox.rental.controller;
+
+import com.xerox.rental.entity.Invoice;
+import com.xerox.rental.entity.InvoiceItem;
+import com.xerox.rental.entity.User;
+import com.xerox.rental.entity.Machine;
+import com.xerox.rental.dto.InvoiceRequest;
+import com.xerox.rental.dto.InvoiceItemRequest;
+import com.xerox.rental.service.InvoiceService;
+import com.xerox.rental.service.UserService;
+import com.xerox.rental.service.MachineService;
+import com.xerox.rental.service.NotificationService;
+import com.xerox.rental.service.PdfGenerationService;
+import com.xerox.rental.service.AuditLogService;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+
+@RestController
+@RequestMapping("/api/invoices")
+@CrossOrigin(origins = "*")
+public class InvoiceController {
+    
+    @Autowired
+    private InvoiceService invoiceService;
+    
+    @Autowired
+    private NotificationService notificationService;
+    
+    @Autowired
+    private UserService userService;
+    
+    @Autowired
+    private MachineService machineService;
+
+    @Autowired
+    private AuditLogService auditLogService;
+
+    @Autowired
+    private PdfGenerationService pdfGenerationService;
+
+    // ✅ NEW ENDPOINT — fetch rental-related machines only
+    @GetMapping("/machines/by-rental/{rentalId}")
+    public ResponseEntity<List<Machine>> getMachinesByRental(@PathVariable Long rentalId) {
+        try {
+            List<Machine> machines = invoiceService.getMachinesByRental(rentalId);
+            return ResponseEntity.ok(machines);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.badRequest().build();
+        }
+    }
+
+    @GetMapping
+    public ResponseEntity<List<Invoice>> getAllInvoices(
+            @RequestParam(required = false) String currentUserId,
+            @RequestParam(required = false) String currentUserRole) {
+        try {
+            List<Invoice> invoices = invoiceService.getAllInvoices();
+
+            // Apply role-based filtering
+            if (("OWNER".equalsIgnoreCase(currentUserRole)) && currentUserId != null) {
+                Long ownerId = Long.parseLong(currentUserId);
+                invoices = invoices.stream()
+                        .filter(i -> i.getOwner() != null && i.getOwner().getId().equals(ownerId))
+                        .toList();
+            } else if (("RENTAL".equalsIgnoreCase(currentUserRole)) && currentUserId != null) {
+                Long rentalId = Long.parseLong(currentUserId);
+                invoices = invoices.stream()
+                        .filter(i -> i.getRental() != null && i.getRental().getId().equals(rentalId))
+                        .toList();
+            } else if (("TECHNICIAN".equalsIgnoreCase(currentUserRole)) && currentUserId != null) {
+                Long technicianId = Long.parseLong(currentUserId);
+                Optional<User> technician = userService.getUserById(technicianId);
+
+                if (technician.isPresent() && technician.get().getOwner() != null) {
+                    Long ownerId = technician.get().getOwner().getId();
+                    invoices = invoices.stream()
+                            .filter(i -> i.getOwner() != null && i.getOwner().getId().equals(ownerId))
+                            .toList();
+                }
+            }
+
+            return ResponseEntity.ok(invoices);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.badRequest().build();
+        }
+    }
+    
+    @GetMapping("/{id}")
+    public ResponseEntity<Invoice> getInvoiceById(@PathVariable Long id) {
+        return invoiceService.getInvoiceById(id)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
+    }
+    
+    @PostMapping
+    public ResponseEntity<Invoice> createInvoice(@RequestBody InvoiceRequest request) {
+        try {
+
+            // ✅ REQUIRED VALIDATION
+            if (request.getOwnerId() == null) {
+                return ResponseEntity.badRequest().build();
+            }
+            if (request.getRentalId() == null) {
+                return ResponseEntity.badRequest().build();
+            }
+
+            Invoice invoice = new Invoice();
+            invoice.setDueDate(request.getDueDate());
+
+            // ---------------- RENTAL ----------------
+            Optional<User> rentalOpt = userService.getUserById(request.getRentalId());
+            if (rentalOpt.isEmpty()) {
+                return ResponseEntity.badRequest().build();
+            }
+            invoice.setRental(rentalOpt.get());
+
+            // ---------------- OWNER ----------------
+            Optional<User> ownerOpt = userService.getUserById(request.getOwnerId());
+            if (ownerOpt.isEmpty()) {
+                return ResponseEntity.badRequest().build();
+            }
+            invoice.setOwner(ownerOpt.get());
+
+            // ---------------- MACHINE (optional) ----------------
+            if (request.getMachineId() != null) {
+                Optional<Machine> machineOpt = machineService.getMachineById(request.getMachineId());
+                if (machineOpt.isEmpty()) {
+                    return ResponseEntity.badRequest().build();
+                }
+                invoice.setMachine(machineOpt.get());
+            }
+
+            // ---------------- READINGS & PRICING ----------------
+            invoice.setStartingReading(request.getStartingReading());
+            invoice.setClosingReading(request.getClosingReading());
+            invoice.setTotalCopies(request.getTotalCopies());
+            invoice.setCopyRatio(request.getCopyRatio());
+            invoice.setFreeCopies(request.getFreeCopies());
+            invoice.setBillableCopies(request.getBillableCopies());
+            invoice.setClassification(request.getClassification());
+            invoice.setMonthlyRent(request.getMonthlyRent());
+
+            // ---------------- MULTI-MACHINE ITEMS ----------------
+            if (request.getItems() != null && !request.getItems().isEmpty()) {
+                List<InvoiceItem> invoiceItems = new ArrayList<>();
+
+                for (InvoiceItemRequest itemRequest : request.getItems()) {
+                    InvoiceItem item = new InvoiceItem();
+
+                    Optional<Machine> itemMachine = machineService.getMachineById(itemRequest.getMachineId());
+                    if (itemMachine.isEmpty()) {
+                        return ResponseEntity.badRequest().build();
+                    }
+
+                    item.setInvoice(invoice);
+                    item.setMachine(itemMachine.get());
+                    item.setStartingReading(itemRequest.getStartingReading());
+                    item.setClosingReading(itemRequest.getClosingReading());
+                    item.setTotalCopies(itemRequest.getTotalCopies());
+                    item.setFreeCopies(itemRequest.getFreeCopies() != null ? itemRequest.getFreeCopies() : 0L);
+                    item.setBillableCopies(itemRequest.getBillableCopies());
+                    item.setCopyRatio(itemRequest.getCopyRatio());
+                    item.setMonthlyRent(itemRequest.getMonthlyRent());
+                    item.setAmount(itemRequest.getAmount() != null ? itemRequest.getAmount() : 0.0);
+
+                    invoiceItems.add(item);
+                }
+
+                invoice.setInvoiceItems(invoiceItems);
+                invoice.setMachine(null); // multi-machine invoice
+            }
+
+            // ---------------- STATUS (safe parsing) ----------------
+            if (request.getStatus() != null) {
+                try {
+                    invoice.setStatus(Invoice.Status.valueOf(request.getStatus().toUpperCase()));
+                } catch (IllegalArgumentException ex) {
+                    return ResponseEntity.badRequest().build();
+                }
+            }
+
+            // ---------------- SAVE INVOICE ----------------
+            Invoice createdInvoice = invoiceService.createInvoice(invoice);
+
+            // ---------------- AUDIT LOG (non-blocking) ----------------
+            try {
+                auditLogService.logEntityCreation(
+                        createdInvoice.getOwner(),
+                        "Invoice",
+                        createdInvoice.getId().toString(),
+                        "Created invoice: " + createdInvoice.getInvoiceNumber()
+                );
+            } catch (Exception e) {
+                System.err.println("Audit log failed: " + e.getMessage());
+            }
+
+            // ---------------- NOTIFICATION (non-blocking) ----------------
+            try {
+                notificationService.sendInvoiceGeneratedNotification(
+                        createdInvoice.getRental(),
+                        createdInvoice.getInvoiceNumber(),
+                        createdInvoice.getTotalAmount()
+                );
+            } catch (Exception e) {
+                System.err.println("Notification failed: " + e.getMessage());
+            }
+
+            return ResponseEntity.ok(createdInvoice);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.status(500).build();
+        }
+    }
+
+    @PutMapping("/{id}")
+    public ResponseEntity<Invoice> updateInvoice(@PathVariable Long id, @RequestBody InvoiceRequest request) {
+        try {
+            Optional<Invoice> existingInvoice = invoiceService.getInvoiceById(id);
+            if (existingInvoice.isEmpty()) {
+                return ResponseEntity.notFound().build();
+            }
+
+            Invoice invoice = existingInvoice.get();
+            if (request.getAmount() != null) invoice.setAmount(request.getAmount());
+            if (request.getDueDate() != null) invoice.setDueDate(request.getDueDate());
+            if (request.getPaidDate() != null) invoice.setPaidDate(request.getPaidDate());
+
+            if (request.getStatus() != null) {
+                invoice.setStatus(Invoice.Status.valueOf(request.getStatus().toUpperCase()));
+            }
+            if (request.getPaymentMode() != null) {
+                invoice.setPaymentMode(Invoice.PaymentMode.valueOf(request.getPaymentMode().toUpperCase()));
+            }
+
+            Invoice updatedInvoice = invoiceService.updateInvoice(id, invoice);
+            return ResponseEntity.ok(updatedInvoice);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.badRequest().build();
+        }
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> deleteInvoice(@PathVariable Long id) {
+        invoiceService.deleteInvoice(id);
+        return ResponseEntity.ok().build();
+    }
+
+    @GetMapping("/owner/{ownerId}")
+    public ResponseEntity<List<Invoice>> getInvoicesByOwner(@PathVariable Long ownerId) {
+        return ResponseEntity.ok(invoiceService.getInvoicesByOwner(ownerId));
+    }
+
+    @GetMapping("/rental/{rentalId}")
+    public ResponseEntity<List<Invoice>> getInvoicesByRental(@PathVariable Long rentalId) {
+        return ResponseEntity.ok(invoiceService.getInvoicesByRental(rentalId));
+    }
+
+    @GetMapping("/status/{status}")
+    public ResponseEntity<List<Invoice>> getInvoicesByStatus(@PathVariable Invoice.Status status) {
+        return ResponseEntity.ok(invoiceService.getInvoicesByStatus(status));
+    }
+
+    @PutMapping("/{id}/pay")
+    public ResponseEntity<Invoice> markAsPaid(@PathVariable Long id, @RequestParam Invoice.PaymentMode paymentMode) {
+        return ResponseEntity.ok(invoiceService.markAsPaid(id, paymentMode));
+    }
+
+    @GetMapping("/machine/{machineId}/owner/{ownerId}/last-reading")
+    public ResponseEntity<Long> getLastClosingReading(
+            @PathVariable Long machineId,
+            @PathVariable Long ownerId
+    ) {
+        Long lastReading = invoiceService.getLastClosingReading(machineId, ownerId);
+        return ResponseEntity.ok(lastReading);
+    }
+
+    @GetMapping("/{id}/pdf")
+    public ResponseEntity<byte[]> downloadInvoicePdf(@PathVariable Long id) {
+        try {
+            Optional<Invoice> invoiceOpt = invoiceService.getInvoiceById(id);
+            if (invoiceOpt.isEmpty()) {
+                return ResponseEntity.notFound().build();
+            }
+
+            Invoice invoice = invoiceOpt.get();
+            Machine machine = invoice.getMachine();
+            User rental = invoice.getRental();
+            User owner = invoice.getOwner();
+
+            byte[] pdfBytes = pdfGenerationService.generateInvoicePdf(invoice, machine, rental, owner);
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_PDF);
+            headers.setContentDispositionFormData("attachment", "invoice-" + invoice.getInvoiceNumber() + ".pdf");
+            headers.setContentLength(pdfBytes.length);
+
+            return ResponseEntity.ok()
+                    .headers(headers)
+                    .body(pdfBytes);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.internalServerError().build();
+        }
+    }
+}
