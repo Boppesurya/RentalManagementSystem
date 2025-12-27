@@ -33,6 +33,8 @@ import com.xerox.rental.service.SubscriptionPlanService;
 import com.xerox.rental.service.SubscriptionService;
 import com.xerox.rental.service.UserService;
 
+import jakarta.servlet.http.HttpServletRequest;
+
 @RestController
 @RequestMapping("/api/subscriptions")
 @CrossOrigin(origins = "*")
@@ -52,19 +54,21 @@ public class SubscriptionController {
 
     @Autowired
     private PdfGenerationService pdfGenerationService;
-    
+
     @Autowired
     private EmailService emailService;
 
+
+    // ========================= GET ALL =========================
     @GetMapping
     public ResponseEntity<List<SubscriptionResponse>> getAllSubscriptions() {
         List<Subscription> subscriptions = subscriptionService.getAllSubscriptions();
-        List<SubscriptionResponse> response = subscriptions.stream()
-                .map(this::convertToResponse)
-                .collect(Collectors.toList());
-        return ResponseEntity.ok(response);
+        return ResponseEntity.ok(
+                subscriptions.stream().map(this::convertToResponse).collect(Collectors.toList())
+        );
     }
 
+    // ========================= GET BY ID =========================
     @GetMapping("/{id}")
     public ResponseEntity<SubscriptionResponse> getSubscriptionById(@PathVariable Long id) {
         return subscriptionService.getSubscriptionById(id)
@@ -73,6 +77,7 @@ public class SubscriptionController {
                 .orElse(ResponseEntity.notFound().build());
     }
 
+    // ========================= GET USER ACTIVE =========================
     @GetMapping("/user/{userId}")
     public ResponseEntity<SubscriptionResponse> getUserActiveSubscription(@PathVariable Long userId) {
         return subscriptionService.getActiveSubscriptionByUser(userId)
@@ -81,15 +86,16 @@ public class SubscriptionController {
                 .orElse(ResponseEntity.notFound().build());
     }
 
+    // ========================= GET USER ALL =========================
     @GetMapping("/user/{userId}/all")
     public ResponseEntity<List<SubscriptionResponse>> getUserSubscriptions(@PathVariable Long userId) {
         List<Subscription> subscriptions = subscriptionService.getSubscriptionsByUser(userId);
-        List<SubscriptionResponse> response = subscriptions.stream()
-                .map(this::convertToResponse)
-                .collect(Collectors.toList());
-        return ResponseEntity.ok(response);
+        return ResponseEntity.ok(
+                subscriptions.stream().map(this::convertToResponse).collect(Collectors.toList())
+        );
     }
 
+    // ========================= CREATE SUBSCRIPTION =========================
     @PostMapping
     public ResponseEntity<SubscriptionResponse> createSubscription(@RequestBody SubscriptionRequest request) {
         try {
@@ -99,16 +105,11 @@ public class SubscriptionController {
             SubscriptionPlan plan = planService.getPlanById(request.getPlanId())
                     .orElseThrow(() -> new RuntimeException("Plan not found"));
 
-            Subscription.BillingCycle billingCycle = Subscription.BillingCycle.valueOf(
-                    request.getBillingCycle().toUpperCase()
-            );
+            Subscription.BillingCycle billingCycle =
+                    Subscription.BillingCycle.valueOf(request.getBillingCycle().toUpperCase());
 
             Subscription subscription = subscriptionService.createSubscription(
-                    user,
-                    plan,
-                    billingCycle,
-                    request.getPaymentMethod(),
-                    request.getTransactionId()
+                    user, plan, billingCycle, request.getPaymentMethod(), request.getTransactionId()
             );
 
             return ResponseEntity.ok(convertToResponse(subscription));
@@ -118,6 +119,7 @@ public class SubscriptionController {
         }
     }
 
+    // ========================= UPGRADE =========================
     @PostMapping("/{id}/upgrade")
     public ResponseEntity<SubscriptionResponse> upgradeSubscription(
             @PathVariable Long id,
@@ -135,6 +137,7 @@ public class SubscriptionController {
         }
     }
 
+    // ========================= RENEW =========================
     @PostMapping("/{id}/renew")
     public ResponseEntity<SubscriptionResponse> renewSubscription(
             @PathVariable Long id,
@@ -150,41 +153,33 @@ public class SubscriptionController {
         }
     }
 
+    // ========================= CANCEL =========================
     @PostMapping("/{id}/cancel")
     public ResponseEntity<RefundCalculationResponse> cancelSubscription(@PathVariable Long id) {
         try {
-
             Subscription subscription = subscriptionService.getSubscriptionById(id)
                     .orElseThrow(() -> new RuntimeException("Subscription not found"));
 
-            // 1️⃣ Calculate refund BEFORE cancelling
             Double refundAmount = subscriptionService.calculateRefund(subscription);
             if (refundAmount == null) refundAmount = 0.0;
 
-            // 2️⃣ Cancel subscription
             subscriptionService.cancelSubscription(id);
 
-            // 3️⃣ Calculate date metrics (SAFE)
             LocalDate start = subscription.getStartDate().toLocalDate();
             LocalDate end = subscription.getEndDate().toLocalDate();
             LocalDate today = LocalDate.now();
 
-            Long totalDays = (Long) ChronoUnit.DAYS.between(start, end);
-            if (totalDays <= 0) totalDays =null ; // prevent divide by zero
-
-            Long daysUsed = (Long) ChronoUnit.DAYS.between(start, today);
-            if (daysUsed < 0) daysUsed = null;
+            Long totalDays = ChronoUnit.DAYS.between(start, end);
+            Long daysUsed = ChronoUnit.DAYS.between(start, today);
+            if (daysUsed < 0) daysUsed = 0L;
             if (daysUsed > totalDays) daysUsed = totalDays;
 
             Long remainingDays = totalDays - daysUsed;
-
             double dailyRate = subscription.getAmountPaid() / totalDays;
 
-            // 4️⃣ Admin fee (5%)
             double refundBeforeFee = refundAmount / 0.95;
             double adminFee = refundBeforeFee * 0.05;
 
-            // 5️⃣ Response object
             RefundCalculationResponse response = new RefundCalculationResponse();
             response.setAmountPaid(subscription.getAmountPaid());
             response.setTotalDays(totalDays);
@@ -205,6 +200,7 @@ public class SubscriptionController {
     }
 
 
+    // ========================= REFUND ESTIMATE =========================
     @GetMapping("/{id}/refund-estimate")
     public ResponseEntity<RefundCalculationResponse> getRefundEstimate(@PathVariable Long id) {
         try {
@@ -231,6 +227,7 @@ public class SubscriptionController {
         }
     }
 
+    // ========================= AUTO RENEW =========================
     @PutMapping("/{id}/auto-renew")
     public ResponseEntity<SubscriptionResponse> toggleAutoRenew(
             @PathVariable Long id,
@@ -245,63 +242,81 @@ public class SubscriptionController {
         }
     }
 
+    // ========================= STATUS FILTER =========================
     @GetMapping("/status/{status}")
     public ResponseEntity<List<SubscriptionResponse>> getSubscriptionsByStatus(@PathVariable String status) {
         try {
             Subscription.Status statusEnum = Subscription.Status.valueOf(status.toUpperCase());
             List<Subscription> subscriptions = subscriptionService.getSubscriptionsByStatus(statusEnum);
-            List<SubscriptionResponse> response = subscriptions.stream()
-                    .map(this::convertToResponse)
-                    .collect(Collectors.toList());
-            return ResponseEntity.ok(response);
+
+            return ResponseEntity.ok(
+                    subscriptions.stream().map(this::convertToResponse).collect(Collectors.toList())
+            );
         } catch (Exception e) {
             e.printStackTrace();
             return ResponseEntity.badRequest().build();
         }
     }
 
+    // ========================= EXPIRING =========================
     @GetMapping("/expiring")
     public ResponseEntity<List<SubscriptionResponse>> getExpiringSubscriptions(@RequestParam Integer days) {
         List<Subscription> subscriptions = subscriptionService.getExpiringSubscriptions(days);
-        List<SubscriptionResponse> response = subscriptions.stream()
-                .map(this::convertToResponse)
-                .collect(Collectors.toList());
-        return ResponseEntity.ok(response);
+
+        return ResponseEntity.ok(
+                subscriptions.stream().map(this::convertToResponse).collect(Collectors.toList())
+        );
     }
 
+    // ========================= PENDING =========================
     @GetMapping("/pending")
     public ResponseEntity<List<SubscriptionResponse>> getPendingVerificationSubscriptions() {
         List<Subscription> subscriptions = subscriptionService.getPendingVerificationSubscriptions();
-        List<SubscriptionResponse> response = subscriptions.stream()
-                .map(this::convertToResponse)
-                .collect(Collectors.toList());
-        return ResponseEntity.ok(response);
+
+        return ResponseEntity.ok(
+                subscriptions.stream().map(this::convertToResponse).collect(Collectors.toList())
+        );
     }
 
+    // =============================================================
+    //          UPDATED: VERIFY PAYMENT → AUTOMATIC ADMIN
+    // =============================================================
     @PostMapping("/{id}/verify-payment")
     public ResponseEntity<SubscriptionResponse> verifyPayment(
             @PathVariable Long id,
-            @RequestParam Long adminId,
             @RequestParam boolean approved,
-            @RequestParam(required = false) String adminNotes) {
+            @RequestParam(required = false) String adminNotes,
+            HttpServletRequest request) {
 
-        // 🔥 Debug log – shows EXACT adminId received by server (important for Ubuntu)
-        System.out.println("VERIFY PAYMENT → Received adminId = " + adminId);
+        try {
+            // Admin Auto-detect from JWT
+            Long adminId = (Long) request.getAttribute("userId");
+            String role = (String) request.getAttribute("userRole");
 
-        // 🔥 FIX: Return clear error if admin not found in database
-        User admin = userService.getUserById(adminId)
-                .orElseThrow(() -> new RuntimeException(
-                        "Admin user not found in server database. adminId=" + adminId));
+            System.out.println("JWT AdminId = " + adminId);
+            System.out.println("JWT Role = " + role);
 
-        // Process verification
-        Subscription verified = subscriptionService.verifyPaymentAndActivate(
-                id, admin, approved, adminNotes
-        );
+            if (adminId == null || role == null || !role.equalsIgnoreCase("ADMIN")) {
+                throw new RuntimeException("Unauthorized: Only admin can verify payments");
+            }
 
-        return ResponseEntity.ok(convertToResponse(verified));
+            User admin = userService.getUserById(adminId)
+                    .orElseThrow(() -> new RuntimeException("Admin user not found"));
+
+            Subscription verified = subscriptionService.verifyPaymentAndActivate(
+                    id, admin, approved, adminNotes
+            );
+
+            return ResponseEntity.ok(convertToResponse(verified));
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.badRequest().build();
+        }
     }
 
 
+    // ========================= DOWNLOAD INVOICE =========================
     @GetMapping("/{id}/invoice/pdf")
     public ResponseEntity<byte[]> downloadSubscriptionInvoice(@PathVariable Long id) {
         try {
@@ -320,41 +335,35 @@ public class SubscriptionController {
                     "subscription_invoice_" + subscription.getInvoiceNumber() + ".pdf");
             headers.setContentLength(pdfBytes.length);
 
-            return ResponseEntity.ok()
-                    .headers(headers)
-                    .body(pdfBytes);
+            return ResponseEntity.ok().headers(headers).body(pdfBytes);
+
         } catch (Exception e) {
             e.printStackTrace();
             return ResponseEntity.badRequest().build();
         }
     }
 
-   
-            
+
+    // ========================= CONVERT TO RESPONSE =========================
     private SubscriptionResponse convertToResponse(Subscription subscription) {
         SubscriptionResponse response = new SubscriptionResponse();
 
-        // Basic details
         response.setId(subscription.getId());
 
-        // User details
-        if (subscription.getUser() != null) {
-            response.setUserId(subscription.getUser().getId());
-            response.setUserName(subscription.getUser().getName());
-            response.setUserEmail(subscription.getUser().getEmail());
-            response.setUserPhone(subscription.getUser().getContactNumber());
-        }
+        // User
+        response.setUserId(subscription.getUser().getId());
+        response.setUserName(subscription.getUser().getName());
+        response.setUserEmail(subscription.getUser().getEmail());
+        response.setUserPhone(subscription.getUser().getContactNumber());
 
-        // Plan details
-        if (subscription.getPlan() != null) {
-            response.setPlanId(subscription.getPlan().getId());
-            response.setPlanName(subscription.getPlan().getName());
-            response.setPlanDescription(subscription.getPlan().getDescription());
-            response.setPlanMonthlyPrice(subscription.getPlan().getMonthlyPrice());
-            response.setPlanYearlyPrice(subscription.getPlan().getYearlyPrice());
-        }
+        // Plan
+        response.setPlanId(subscription.getPlan().getId());
+        response.setPlanName(subscription.getPlan().getName());
+        response.setPlanDescription(subscription.getPlan().getDescription());
+        response.setPlanMonthlyPrice(subscription.getPlan().getMonthlyPrice());
+        response.setPlanYearlyPrice(subscription.getPlan().getYearlyPrice());
 
-        // Subscription details
+        // Subscription info
         response.setStatus(subscription.getStatus().name());
         response.setBillingCycle(subscription.getBillingCycle().name());
         response.setStartDate(subscription.getStartDate());
@@ -364,27 +373,22 @@ public class SubscriptionController {
         response.setIsTrial(subscription.getIsTrial());
         response.setMachineLimit(subscription.getMachineLimit());
 
-        // Payment details
+        // Payment
         response.setAmountPaid(subscription.getAmountPaid());
         response.setPaymentMethod(subscription.getPaymentMethod());
         response.setTransactionId(subscription.getTransactionId());
         response.setPaymentVerified(subscription.getPaymentVerified());
         response.setPaymentVerifiedAt(subscription.getPaymentVerifiedAt());
-
         response.setPaymentVerifiedBy(
-        	    subscription.getPaymentVerifiedBy() != null 
-        	        ? String.valueOf(subscription.getPaymentVerifiedBy().getId())
-        	        : null
-        	);
-
+                subscription.getPaymentVerifiedBy() != null ?
+                        String.valueOf(subscription.getPaymentVerifiedBy().getId()) : null
+        );
         response.setInvoiceNumber(subscription.getInvoiceNumber());
         response.setAdminNotes(subscription.getAdminNotes());
 
-        // Machine count (safe)
+        // Machine count
         try {
-            int machineCount = machineService
-                    .getMachinesByOwner(subscription.getUser().getId())
-                    .size();
+            int machineCount = machineService.getMachinesByOwner(subscription.getUser().getId()).size();
             response.setCurrentMachineCount(machineCount);
         } catch (Exception e) {
             response.setCurrentMachineCount(0);
@@ -401,5 +405,4 @@ public class SubscriptionController {
 
         return response;
     }
-
 }
