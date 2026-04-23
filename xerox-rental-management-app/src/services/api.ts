@@ -152,7 +152,7 @@ export const apiService = {
   async getUsers(): Promise<User[]> {
     try {
       const currentUser = JSON.parse(localStorage.getItem('currentUser') || '{}');
-      console.log('API: Getting users for current user:', currentUser);
+     
       const response = await api.get('/users', {
         params: {
           currentUserId: currentUser.id,
@@ -160,7 +160,7 @@ export const apiService = {
         }
       });
       const users = handleResponse(response);
-      console.log('API: Received users from backend:', users);
+     
       return users;
     } catch (error) {
       console.error('API: Error getting users:', error);
@@ -179,7 +179,7 @@ export const apiService = {
 
   async createUser(userData: Partial<User>): Promise<User> {
     try {
-      console.log('API: Creating user with data:', userData);
+      
       // Convert frontend data to backend format
       const requestData = {
         name: userData.name,
@@ -193,10 +193,10 @@ export const apiService = {
         ownerId: userData.ownerId ? (typeof userData.ownerId === 'string' ? parseInt(userData.ownerId) : userData.ownerId) : null
       };
       
-      console.log('API: Sending request data to backend:', requestData);
+      
       const response = await api.post('/users', requestData);
       const createdUser = handleResponse(response);
-      console.log('API: Created user response:', createdUser);
+     
       return createdUser;
     } catch (error) {
       console.error('API: Error creating user:', error);
@@ -333,7 +333,7 @@ export const apiService = {
     }
   },
 
-  // Invoices
+    // Invoices
   async getInvoices(): Promise<Invoice[]> {
     try {
       const response = await api.get('/invoices');
@@ -380,9 +380,8 @@ export const apiService = {
 
   async getInvoicesByOwner(ownerId: string): Promise<Invoice[]> {
     try {
-      const response = await api.get('/invoices');
-      const invoices = handleResponse(response);
-      return invoices.filter((inv: Invoice) => inv.owner?.id === ownerId);
+      const response = await api.get(`/invoices/owner/${ownerId}`);
+      return handleResponse(response);
     } catch (error) {
       return handleError(error as AxiosError);
     }
@@ -390,17 +389,47 @@ export const apiService = {
 
   async getInvoicesByRental(rentalId: string): Promise<Invoice[]> {
     try {
-      const response = await api.get('/invoices');
-      const invoices = handleResponse(response);
-      return invoices.filter((inv: Invoice) => inv.rental?.id === rentalId);
+      const response = await api.get(`/invoices/rental/${rentalId}`);
+      return handleResponse(response);
     } catch (error) {
       return handleError(error as AxiosError);
     }
   },
 
+  async getInvoicesByOwnerAndFinancialYear(ownerId: string, fy: string): Promise<Invoice[]> {
+    try {
+      const response = await api.get(`/invoices/owner/${ownerId}/financial-year/${fy}`);
+      return handleResponse(response);
+    } catch (error) {
+      return handleError(error as AxiosError);
+    }
+  },
+
+  async getCurrentFinancialYear(): Promise<{ financialYear: string }> {
+    try {
+      const response = await api.get('/invoices/financial-year/current');
+      return handleResponse(response);
+    } catch (error) {
+      return handleError(error as AxiosError);
+    }
+  },
+
+
+  async getLastClosingReading(machineId: string, ownerId: string): Promise<number> {
+    try {
+      const response = await api.get(`/invoices/machine/${machineId}/owner/${ownerId}/last-reading`);
+      return handleResponse(response);
+    } catch (error) {
+      return handleError(error as AxiosError);
+    }
+  },
+
+  // -- PDF downloads --------------------------------------------------------
+
+  /** Download ORIGINAL copy (for rental customer) */
   async downloadInvoicePdf(id: string): Promise<Blob> {
     try {
-      const response = await api.get(`/invoices/${id}/pdf`, {
+      const response = await api.get(`/invoices/${id}/pdf/original`, {
         responseType: 'blob'
       });
       return response.data;
@@ -409,15 +438,61 @@ export const apiService = {
     }
   },
 
-  async markInvoiceAsPaid(id: string, paymentMode: 'online' | 'offline'): Promise<Invoice> {
+  /** Download ORIGINAL copy explicitly */
+  async downloadOriginalPdf(id: string): Promise<Blob> {
     try {
-      const response = await api.put(`/invoices/${id}/pay?paymentMode=${paymentMode}`);
-      return handleResponse(response);
+      const response = await api.get(`/invoices/${id}/pdf/original`, {
+        responseType: 'blob'
+      });
+      return response.data;
     } catch (error) {
       return handleError(error as AxiosError);
     }
   },
 
+  /** Download OFFICE COPY (retained by owner) */
+  async downloadOfficeCopyPdf(id: string): Promise<Blob> {
+    try {
+      const response = await api.get(`/invoices/${id}/pdf/copy`, {
+        responseType: 'blob'
+      });
+      return response.data;
+    } catch (error) {
+      return handleError(error as AxiosError);
+    }
+  },
+
+  /** Download both copies in a single PDF (page 1 = ORIGINAL, page 2 = OFFICE COPY) */
+  async downloadCombinedPdf(id: string): Promise<Blob> {
+    try {
+      const response = await api.get(`/invoices/${id}/pdf/combined`, {
+        responseType: 'blob'
+      });
+      return response.data;
+    } catch (error) {
+      return handleError(error as AxiosError);
+    }
+  },
+
+  // -- Email ----------------------------------------------------------------
+
+  /**
+   * Sends ORIGINAL PDF to rental customer's email
+   * and OFFICE COPY PDF to owner's email.
+   * Returns { message, rentalEmail, ownerEmail }
+   */
+  async sendInvoiceByEmail(id: string): Promise<{
+    message: string;
+    rentalEmail: string;
+    ownerEmail: string;
+  }> {
+    try {
+      const response = await api.post(`/invoices/${id}/send-email`);
+      return handleResponse(response);
+    } catch (error) {
+      return handleError(error as AxiosError);
+    }
+  },
   // Rental Requests
   async getRentalRequests(): Promise<RentalRequest[]> {
     try {
@@ -671,7 +746,46 @@ export const apiService = {
       return handleError(error as AxiosError);
     }
   },
+  async resolveTicketWithDetails(data: {
+  ticketId: string;
+  resolutionNotes: string;
+  resolvedByUserId: string;
+  resolutionImage?: File;
+}): Promise<Ticket> {
+  try {
+    const formData = new FormData();
+    formData.append('resolutionNotes', data.resolutionNotes);
+    formData.append('resolvedByUserId', data.resolvedByUserId);
 
+    if (data.resolutionImage) {
+      formData.append('resolutionImage', data.resolutionImage);
+    }
+
+    const response = await api.post(
+      `/tickets/${data.ticketId}/resolve-with-details`,
+      formData,
+      {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      }
+    );
+
+    return handleResponse(response);
+  } catch (error) {
+    return handleError(error as AxiosError);
+  }
+},
+async getResolutionImage(filename: string): Promise<Blob> {
+  try {
+    const response = await api.get(`/tickets/resolution-image/${filename}`, {
+      responseType: 'blob',
+    });
+    return response.data;
+  } catch (error) {
+    return handleError(error as AxiosError);
+  }
+},
   // Reports and Analytics
   async getRevenue(): Promise<Revenue[]> {
     try {
@@ -1712,31 +1826,19 @@ export const apiService = {
     adminId: number,
     approved: boolean,
     adminNotes?: string
-  ) {
+  ): Promise<{
+    id: number;
+    status: string;
+    paymentVerified: boolean;
+  }> {
     try {
-      // FIX 1: Always fetch token manually
-      const token = localStorage.getItem("authToken");
-  
-      if (!token) {
-        throw new Error("Authentication expired. Please login again.");
-      }
-  
-      // FIX 2: Send empty {} body instead of null (mobile-compatible)
-      const response = await api.post(
-        `/subscriptions/${subscriptionId}/verify-payment`,
-        {}, // IMPORTANT FIX
-        {
-          headers: {
-            Authorization: `Bearer ${token}` // FIX 3: manual header (mobile safe)
-          },
-          params: {
-            adminId: adminId.toString(), // FIX 4: string (mobile-safe)
-            approved: approved ? "true" : "false", // FIX 5: send as string
-            adminNotes: adminNotes || ""
-          }
+      const response = await api.post(`/subscriptions/${subscriptionId}/verify-payment`, null, {
+        params: {
+          adminId,
+          approved,
+          adminNotes: adminNotes || ''
         }
-      );
-  
+      });
       return handleResponse(response);
     } catch (error) {
       return handleError(error as AxiosError);
